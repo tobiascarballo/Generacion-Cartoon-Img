@@ -337,6 +337,47 @@ def generar_panel_etapas_visuales(base_dir, plots_dir):
         plt.savefig(os.path.join(plots_dir, "comparativa_parametros_cartoon.png"), bbox_inches="tight", pad_inches=0.18)
         plt.close(fig2)
 
+    # Panel de las 3 fotos reales provistas por los alumnos (foto1.jpg, foto2.jpg, foto3.jpg)
+    fotos_reales = [
+        ("foto1", "Foto 1 (Retrato 679x906)"),
+        ("foto2", "Foto 2 (Automóvil 860x573)"),
+        ("foto3", "Foto 3 (Paisaje 860x570)"),
+    ]
+    filas_reales = []
+    for base_f, etiqueta_f in fotos_reales:
+        p_orig = os.path.join(base_dir, f"{base_f}.jpg")
+        p_out  = os.path.join(base_dir, "img", "output", f"{base_f}_cartoon.png")
+        p_b1   = p_out + "_1_borroneado.png"
+        p_b2   = p_out + "_2_bordes.png"
+        p_b3   = p_out + "_3_posterizado.png"
+        if all(os.path.exists(x) for x in (p_orig, p_b1, p_b2, p_b3, p_out)):
+            filas_reales.append((etiqueta_f, [p_orig, p_b1, p_b2, p_b3, p_out]))
+
+    if filas_reales:
+        fig3, axes3 = plt.subplots(len(filas_reales), 5, figsize=(15.5, 3.3 * len(filas_reales)), dpi=160)
+        if len(filas_reales) == 1:
+            axes3 = [axes3]
+        titulos_cols = [
+            "1. Imagen Original",
+            "2. Paso 1: Filtrado (Borroneo)",
+            "3. Pasos 2-3: Bordes (Sobel+Umbral)",
+            "4. Rama 2: Posterizado RGB",
+            "5. Cartoon Final (Suma)",
+        ]
+        for r_idx, (etiqueta_f, rutas_f) in enumerate(filas_reales):
+            for c_idx, ruta_img in enumerate(rutas_f):
+                ax = axes3[r_idx][c_idx]
+                ax.imshow(Image.open(ruta_img))
+                if r_idx == 0:
+                    ax.set_title(titulos_cols[c_idx], fontsize=9.5, fontweight="bold")
+                if c_idx == 0:
+                    ax.set_ylabel(etiqueta_f, fontsize=9.5, fontweight="bold")
+                ax.set_xticks([])
+                ax.set_yticks([])
+        plt.tight_layout()
+        plt.savefig(os.path.join(plots_dir, "panel_fotos_reales.png"), bbox_inches="tight", pad_inches=0.18)
+        plt.close(fig3)
+
 
 def main():
     base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))

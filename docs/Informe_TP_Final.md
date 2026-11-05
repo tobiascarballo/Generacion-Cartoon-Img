@@ -81,6 +81,8 @@ $$I_{\text{cartoon}}(y, x, c) = \min\big(255,\ I_{\text{post}}(y, x, c) + I_{\te
 
 ![Comparativa Visual de Filtros 3x3 vs 5x5 y Posterizado 3 vs 9](../results/plots/comparativa_parametros_cartoon.png)
 
+![Aplicación del Pipeline sobre Fotografías Reales (foto1.jpg, foto2.jpg, foto3.jpg)](../results/plots/panel_fotos_reales.png)
+
 ---
 
 ## 3. Estrategias de División del Problema y Comunicaciones

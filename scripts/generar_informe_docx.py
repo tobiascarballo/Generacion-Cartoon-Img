@@ -227,6 +227,12 @@ def main():
         cap = doc.add_paragraph("Figura 2: Comparativa visual variando tamaño de filtro (3x3 vs 5x5) y rangos de posterizado (3 vs 9).")
         cap.alignment = WD_ALIGN_PARAGRAPH.CENTER
 
+    p_img_reales = os.path.join(plots_dir, "panel_fotos_reales.png")
+    if os.path.exists(p_img_reales):
+        doc.add_picture(p_img_reales, width=Inches(6.5))
+        cap = doc.add_paragraph("Figura 2b: Aplicación del pipeline completo sobre fotografías reales (foto1.jpg, foto2.jpg y foto3.jpg) verificadas en las 4 versiones (MaxDiff = 0).")
+        cap.alignment = WD_ALIGN_PARAGRAPH.CENTER
+
     # 3. Estrategias de Division y Comunicaciones
     agregar_titulo_seccion(doc, "3. Estrategias de División de Problemas y Comunicaciones", nivel=1)
     doc.add_paragraph(
