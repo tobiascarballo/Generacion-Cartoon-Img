@@ -1,0 +1,10 @@
+# Salidas temporales generadas
+img/output/*
+!img/output/.gitkeep
+
+# Archivos de depuracion y temporales de compilacion
+*.o
+*.obj
+*.log
+.DS_Store
+Thumbs.db

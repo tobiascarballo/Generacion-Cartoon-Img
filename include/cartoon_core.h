@@ -2,15 +2,24 @@
  * ============================================================================
  * Trabajo Practico Final Integrador - Computacion Avanzada (UADER FCyT)
  * Alumnos: Carballo Tobias, Dacuy Santino
+ * Docente: Dra. Maria Fabiana Piccoli
  *
- * Archivo: cartoon_core.h
+ * Archivo: include/cartoon_core.h
  * Descripcion:
- *   Nucleo matematico y utilidades de E/S para la generacion de imagenes
- *   Cartoon a partir de imagenes RGB. Compartido por las 4 versiones:
- *     1. Secuencial (cartoon_seq.c)
- *     2. Memoria Distribuida - MPI (cartoon_mpi.c)
- *     3. Memoria Compartida - OpenMP (cartoon_omp.c)
- *     4. Paralela Hibrida - MPI + OpenMP (cartoon_hybrid.c)
+ *   Nucleo computacional y matematico compartido por las cuatro implementaciones:
+ *     1. Secuencial (src/cartoon_seq.c)
+ *     2. Memoria Compartida - OpenMP (src/cartoon_omp.c)
+ *     3. Memoria Distribuida - MPI (src/cartoon_mpi.c)
+ *     4. Paralela Hibrida - MPI + OpenMP (src/cartoon_hybrid.c)
+ *
+ *   Implementa el pipeline completo del efecto Cartoon descripto en el apunte
+ *   de catedra "Procesamiento de Imagenes" de la Dra. Piccoli:
+ *     - RAMA 1: Deteccion de bordes en tres pasos obligatorios:
+ *         * Paso 1: Filtrado / Borroneo (media aritmetica 3x3 o 5x5).
+ *         * Paso 2: Resaltado con gradiente direccional de Sobel (3x3 o 5x5).
+ *         * Paso 3: Deteccion mediante umbralado binario (Umbralize).
+ *     - RAMA 2: Posterizado cuantizado por canal RGB independiente y fusion.
+ *     - COMBINACION FINAL: Suma pixel a pixel con saturacion en 255.
  * ============================================================================
  */
 
@@ -23,22 +32,41 @@
 #include <string.h>
 #include <math.h>
 
-/* Numero de canales fijos para representacion RGB (3 bytes por pixel) */
+/*
+ * CANALES_RGB: Cada pixel digital en formato RGB se representa con 3 canales:
+ *   Indice 0: Rojo (Red)
+ *   Indice 1: Verde (Green)
+ *   Indice 2: Azul (Blue)
+ * La imagen se almacena en memoria contigua en orden por filas (row-major order):
+ *   Tamanio total = ancho * alto * 3 bytes.
+ */
 #define CANALES_RGB 3
 
-/* Umbral por defecto para el Paso 3 de Deteccion de Bordes (Pag. 58 Apunte) */
+/*
+ * UMBRAL_BORDE_DEF: Valor de corte por defecto para el Paso 3 (Umbralize).
+ * Si la magnitud ponderada del gradiente de Sobel supera este valor, el pixel
+ * se clasifica como borde (255 = blanco); en caso contrario, se descarta (0 = negro).
+ */
 #define UMBRAL_BORDE_DEF 90
 
 /* ----------------------------------------------------------------------------
- * Funcion auxiliar para reserva segura de memoria contigua inicializada en 0
- * (Cumple con la regla: "el valor neutro para bordes auxiliares es negro = 0")
+ * reservar_memoria:
+ *   Encapsula la reserva dinamica de memoria usando calloc, que ademas de
+ *   garantizar memoria contigua inicializa todos los bytes a cero.
+ *   Esto asegura que los pixeles de borde auxiliar comiencen siendo negros (0,0,0),
+ *   respetando estrictamente la consigna del trabajo practico.
  * ---------------------------------------------------------------------------- */
 static inline void *reservar_memoria(size_t cantidad, size_t tam_elemento)
 {
+    /* Si se solicitan 0 elementos, se reserva 1 byte para evitar punteros NULL ambiguos */
     size_t n = (cantidad > 0) ? cantidad : 1;
+
+    /* calloc limpia a 0 toda la memoria asignada */
     void *ptr = calloc(n, tam_elemento);
+
+    /* Validacion de seguridad: si el sistema operativo rechaza la solicitud, se aborta */
     if (!ptr) {
-        fprintf(stderr, "[ERROR] Fallo al reservar memoria (%zu elementos de %zu bytes).\n",
+        fprintf(stderr, "[ERROR CRITICO] Fallo de asignacion de memoria: %zu elementos de %zu bytes.\n",
                 cantidad, tam_elemento);
         exit(EXIT_FAILURE);
     }
@@ -46,7 +74,10 @@ static inline void *reservar_memoria(size_t cantidad, size_t tam_elemento)
 }
 
 /* ----------------------------------------------------------------------------
- * Saturacion de valores enteros al rango de 8 bits [0, 255]
+ * saturar_u8:
+ *   Garantiza que cualquier resultado aritmetico (sumas, magnitudes, convoluciones)
+ *   permanezca confinado en el rango representable por un entero sin signo de 8 bits:
+ *   [0, 255]. Si es menor a 0 se trunca a 0; si supera 255 se trunca a 255.
  * ---------------------------------------------------------------------------- */
 static inline uint8_t saturar_u8(int valor)
 {
@@ -56,14 +87,10 @@ static inline uint8_t saturar_u8(int valor)
 }
 
 /* ----------------------------------------------------------------------------
- * Lectura segura de un pixel (y, x, c) con condicion de borde auxiliar NEGRO
- *
- * Parametros:
- *   img       : buffer contiguo de tamanio alto_buf * ancho * 3
- *   ancho     : ancho de la imagen en pixeles
- *   alto_buf  : cantidad de filas presentes en el buffer 'img'
- *   y, x, c   : fila, columna y canal (0=R, 1=G, 2=B)
- *   fila_min_valida, fila_max_valida : limites de filas validas en el buffer
+ * obtener_pixel_seguro:
+ *   Lectura segura de un canal de color en la coordenada (y, x, c).
+ *   Si la coordenada cae fuera de las filas validas del buffer o fuera del ancho,
+ *   retorna 0 (color neutro negro), satisfaciendo la condicion de contorno exigida.
  * ---------------------------------------------------------------------------- */
 static inline uint8_t obtener_pixel_seguro(
     const uint8_t *img,
@@ -74,24 +101,31 @@ static inline uint8_t obtener_pixel_seguro(
     int x,
     int c)
 {
+    /* Verificacion de limites espaciales en 2D */
     if (y < fila_min_valida || y >= fila_max_valida || x < 0 || x >= ancho) {
-        return 0; /* Valor neutro negro (0,0,0) para bordes auxiliares */
+        return 0; /* Color neutro negro (0, 0, 0) para bordes fuera de limites */
     }
+
+    /* Mapeo 2D a 1D contiguo: ((y * ancho) + x) * CANALES_RGB + c */
     return img[((size_t)y * ancho + x) * CANALES_RGB + c];
 }
 
 /* ============================================================================
- * RAMA 1: DETECCION DE BORDES (3 PASOS OBLIGATORIOS - Pag. 57 del Apunte)
+ * RAMA 1: DETECCION DE BORDES (Apunte de Catedra, Paginas 48 a 58)
  * ============================================================================
  *
- * Paso 1: Filtrado (Eliminacion de ruido / Borroneo de imagen - Pag. 48 y 51)
- *   Aplica un filtro pasa-bajo de media aritmetica de tamanio K x K
- *   (K = 3 -> 3x3 con peso 1/9; K = 5 -> 5x5 con peso 1/25).
+ * Paso 1: Filtrado / Borroneo (Mean Blur)
+ *   Aplica una convolucion espacial 2D pasa-bajo de media aritmetica (K x K):
+ *     - K = 3: Mascara de 3x3 (radio = 1, area = 9 elementos con peso 1/9).
+ *     - K = 5: Mascara de 5x5 (radio = 2, area = 25 elementos con peso 1/25).
+ *   Objetivo: Atenuar el ruido de alta frecuencia para que los operadores
+ *   gradientes posteriores no detecten falsos positivos en zonas texturadas.
  *
- *   Soporta procesamiento de un subconjunto de filas [fila_ini, fila_fin)
- *   dentro de un buffer que tiene filas validas en [fila_min_buf, fila_max_buf),
- *   lo que permite reutilizar exactamente la misma funcion tanto en memoria
- *   compartida como en cada proceso MPI con filas fantasma (halo rows).
+ *   Disenio para paralelismo:
+ *     Trabaja en el intervalo de filas [fila_ini, fila_fin).
+ *     El buffer de entrada contiene datos validos entre [fila_min_buf, fila_max_buf).
+ *     En OpenMP: fila_min_buf = 0, fila_max_buf = alto total.
+ *     En MPI: fila_min_buf = 0 (incluyendo halo superior), fila_max_buf = total_con_halos.
  * ============================================================================ */
 static inline void paso1_filtrado_borroneo_rango(
     const uint8_t *entrada,
@@ -103,27 +137,36 @@ static inline void paso1_filtrado_borroneo_rango(
     int fila_max_buf,
     int tam_filtro)
 {
-    const int radio = tam_filtro / 2; /* 1 para 3x3, 2 para 5x5 */
-    const int area = tam_filtro * tam_filtro; /* 9 para 3x3, 25 para 5x5 */
+    /* Radio de la ventana de convolucion (1 para 3x3, 2 para 5x5) */
+    const int radio = tam_filtro / 2;
 
+    /* Cantidad total de coeficientes de la mascara (9 o 25) */
+    const int area = tam_filtro * tam_filtro;
+
+    /* Recorrido fila por fila del bloque asignado a este hilo o proceso */
     for (int y = fila_ini; y < fila_fin; y++) {
         for (int x = 0; x < ancho; x++) {
+            /* Acumuladores enteros para evitar desbordes antes de la division */
             int suma_r = 0, suma_g = 0, suma_b = 0;
 
+            /* Convolucion bidimensional sobre la vecindad [-radio, +radio] */
             for (int dy = -radio; dy <= radio; dy++) {
-                int ny = y + dy;
+                int ny = y + dy; /* Coordenada vertical vecina */
                 for (int dx = -radio; dx <= radio; dx++) {
-                    int nx = x + dx;
+                    int nx = x + dx; /* Coordenada horizontal vecina */
+
+                    /* Si el vecino se encuentra dentro del rango de memoria accesible */
                     if (ny >= fila_min_buf && ny < fila_max_buf && nx >= 0 && nx < ancho) {
                         size_t idx = ((size_t)ny * ancho + nx) * CANALES_RGB;
                         suma_r += entrada[idx + 0];
                         suma_g += entrada[idx + 1];
                         suma_b += entrada[idx + 2];
                     }
-                    /* Si cae fuera de limites, el borde auxiliar es negro (suma 0) */
+                    /* Si cae fuera de los bordes, el valor neutro es negro (suma 0) */
                 }
             }
 
+            /* Se calcula el promedio aritmetico dividiendo por el area total */
             size_t out_idx = ((size_t)y * ancho + x) * CANALES_RGB;
             salida_blur[out_idx + 0] = (uint8_t)(suma_r / area);
             salida_blur[out_idx + 1] = (uint8_t)(suma_g / area);
@@ -133,13 +176,21 @@ static inline void paso1_filtrado_borroneo_rango(
 }
 
 /* ============================================================================
- * Paso 2 y Paso 3 de Deteccion de Bordes:
- *   - Paso 2 (Resaltado - Pag. 52, 55, 56): Amplifica la diferencia entre
- *     bordes y no-bordes aplicando la aproximacion del gradiente mediante
- *     operadores de Sobel (3x3 o 5x5) y calculando la magnitud del gradiente:
- *       |G| = sqrt(Gx^2 + Gy^2)
- *   - Paso 3 (Deteccion / Umbralado - Pag. 10 y 58): Aplica la operacion
- *     Umbralize(A, u) para detectar los bordes que superan el umbral.
+ * Pasos 2 y 3: Resaltado de Bordes y Deteccion por Umbralado
+ * ============================================================================
+ *
+ * Paso 2: Resaltado (Sobel)
+ *   Calcula las derivadas espaciales direccionales horizontales (Gx) y
+ *   verticales (Gy) sobre la imagen suavizada.
+ *   Luego calcula la magnitud euclidea del gradiente:
+ *     |G| = sqrt(Gx^2 + Gy^2)
+ *   Calcula la luminancia ponderada segun la percepcion visual humana (Pag. 5 y 12):
+ *     Y = 0.30 * R + 0.59 * G + 0.11 * B
+ *
+ * Paso 3: Deteccion mediante Umbralado (Umbralize)
+ *   Evalua si Y >= umbral:
+ *     - Si es verdadero: 255 (linea de borde blanca).
+ *     - Si es falso: 0 (fondo negro sin bordes).
  * ============================================================================ */
 static inline void paso2y3_resaltado_y_deteccion_rango(
     const uint8_t *entrada_blur,
@@ -152,7 +203,7 @@ static inline void paso2y3_resaltado_y_deteccion_rango(
     int tam_filtro,
     int umbral)
 {
-    /* Mascaras de Sobel 3x3 (Pag. 56 del Apunte) */
+    /* Mascaras direccionales de Sobel 3x3 estandar (Pagina 56 del Apunte) */
     static const int sobel3_x[3][3] = {
         { -1,  0,  1 },
         { -2,  0,  2 },
@@ -164,7 +215,7 @@ static inline void paso2y3_resaltado_y_deteccion_rango(
         { -1, -2, -1 }
     };
 
-    /* Mascaras de Sobel extendidas a 5x5 (para filtro 5x5) */
+    /* Mascaras de Sobel extendidas a 5x5 para filtros de mayor dimension */
     static const int sobel5_x[5][5] = {
         { -1,  -2,  0,   2,  1 },
         { -4,  -8,  0,   8,  4 },
@@ -181,16 +232,22 @@ static inline void paso2y3_resaltado_y_deteccion_rango(
     };
 
     const int radio = tam_filtro / 2;
-    /* Factor de escala para mantener la magnitud de 5x5 comparable con 3x3 */
+
+    /*
+     * Factor de escala: la mascara 5x5 tiene coeficientes mayores; dividiendo por
+     * 12.0f se mantiene la escala dinamica del gradiente equivalente a la de 3x3.
+     */
     const float escala_grad = (tam_filtro == 5) ? (1.0f / 12.0f) : 1.0f;
 
     for (int y = fila_ini; y < fila_fin; y++) {
         for (int x = 0; x < ancho; x++) {
+            /* Acumuladores del gradiente horizontal (Gx) y vertical (Gy) por canal */
             int gx_r = 0, gy_r = 0;
             int gx_g = 0, gy_g = 0;
             int gx_b = 0, gy_b = 0;
 
             if (tam_filtro == 3) {
+                /* Convolucion con mascara Sobel 3x3 */
                 for (int dy = -1; dy <= 1; dy++) {
                     int ny = y + dy;
                     for (int dx = -1; dx <= 1; dx++) {
@@ -212,6 +269,7 @@ static inline void paso2y3_resaltado_y_deteccion_rango(
                     }
                 }
             } else {
+                /* Convolucion con mascara Sobel 5x5 */
                 for (int dy = -2; dy <= 2; dy++) {
                     int ny = y + dy;
                     for (int dx = -2; dx <= 2; dx++) {
@@ -234,44 +292,56 @@ static inline void paso2y3_resaltado_y_deteccion_rango(
                 }
             }
 
-            /* Magnitud del gradiente por canal (Paso 2: Resaltado) */
+            /* Paso 2: Calculo de la magnitud del gradiente |G| = sqrt(Gx^2 + Gy^2) */
             int mag_r = saturar_u8((int)(sqrtf((float)(gx_r * gx_r + gy_r * gy_r)) * escala_grad));
             int mag_g = saturar_u8((int)(sqrtf((float)(gx_g * gx_g + gy_g * gy_g)) * escala_grad));
             int mag_b = saturar_u8((int)(sqrtf((float)(gx_b * gx_b + gy_b * gy_b)) * escala_grad));
 
-            /* Luminancia del gradiente (Pag. 5 y 12: Y = 0.30*R + 0.59*G + 0.11*B)
-               para evaluar el umbral de borde de manera uniforme */
+            /*
+             * Conversion a escala de grises mediante luminosidad perceptiva estandar:
+             *   Y = 0.30 * R + 0.59 * G + 0.11 * B  (Aritmetica entera con base 100)
+             */
             int mag_gris = (30 * mag_r + 59 * mag_g + 11 * mag_b) / 100;
 
-            /* Paso 3: Deteccion mediante Umbralado (Pag. 10 y 58)
-               Rango negro/blanco: si supera el umbral es borde (255), sino 0 (negro) */
+            /*
+             * Paso 3: Umbralado binario (Umbralize):
+             *   Si el cambio de intensidad es abrupto (>= umbral), es borde (255 = blanco).
+             *   Si el cambio es suave (< umbral), es fondo liso (0 = negro).
+             */
             uint8_t valor_borde = (mag_gris >= umbral) ? 255 : 0;
 
+            /* Se asigna el valor binario a los tres canales de salida */
             size_t out_idx = ((size_t)y * ancho + x) * CANALES_RGB;
             salida_bordes[out_idx + 0] = valor_borde;
             salida_bordes[out_idx + 1] = valor_borde;
             salida_bordes[out_idx + 2] = valor_borde;
         }
     }
-    (void)radio;
+    (void)radio; /* Suprime advertencia de variable no utilizada si el compilador no la optimiza */
 }
 
 /* ============================================================================
- * RAMA 2: POSTERIZADO POR CANAL Y SUMA (Pag. 10 y Pag. 12 del Apunte)
+ * RAMA 2: POSTERIZADO POR CANAL Y SUMA (Apunte de Catedra, Paginas 10 y 12)
  * ============================================================================
- *   "Posterizado: Divide el rango total de niveles de color en un rango mas
- *    pequenio. Cada pixel de la imagen original pasa a tener un valor de ese
- *    rango mas pequenio (Pag. 10 y ejemplo imagen color en Pag. 12).
- *    En imagenes color se debe realizar el posterizado de cada color y sumar
- *    las imagenes resultantes en una sola."
+ *
+ * "El posterizado divide el rango total de tonos continuos (0..255) en una
+ *  cantidad finita de rangos discretos (ej. 3 o 9). En imagenes color, se realiza
+ *  el posterizado en cada canal de forma independiente y luego se suman en una sola."
+ *
+ * Optimizacion computacional:
+ *   Se precalcula una tabla Look-Up Table (LUT) de 256 bytes.
+ *   Esto permite mapear cada canal en complejidad temporal O(1) directo de memoria,
+ *   evitando divisiones costosas dentro del bucle de pixeles.
  * ============================================================================ */
 static inline uint8_t cuantizar_nivel_posterizado(uint8_t valor, int num_rangos)
 {
     if (num_rangos <= 1) return 0;
-    /* Indice de escalon en [0, num_rangos - 1] */
+
+    /* Determina a que escalon discreto [0 .. num_rangos - 1] pertenece el valor */
     int escalon = ((int)valor * num_rangos) / 256;
     if (escalon >= num_rangos) escalon = num_rangos - 1;
-    /* Mapeo uniforme del escalon al rango [0, 255] */
+
+    /* Re-proyecta el escalon de forma uniforme al rango visual [0 .. 255] */
     return (uint8_t)((escalon * 255) / (num_rangos - 1));
 }
 
@@ -283,24 +353,23 @@ static inline void rama2_posterizado_rango(
     int fila_fin,
     int num_rangos)
 {
-    /* Precalculamos la tabla de consulta (LUT) de 256 entradas para el
-       posterizado (funcion evaluada z' = T(z) de Pag. 9 y 10 del Apunte) */
+    /* Precomputacion de la tabla LUT (256 entradas) */
     uint8_t lut[256];
     for (int z = 0; z < 256; z++) {
         lut[z] = cuantizar_nivel_posterizado((uint8_t)z, num_rangos);
     }
 
+    /* Recorrido de los pixeles de las filas asignadas */
     for (int y = fila_ini; y < fila_fin; y++) {
         for (int x = 0; x < ancho; x++) {
             size_t idx = ((size_t)y * ancho + x) * CANALES_RGB;
 
-            /* Posterizado independiente de cada canal (R, G, B) */
+            /* Posterizacion O(1) independiente por cada componente espectral */
             uint8_t r_post = lut[entrada_orig[idx + 0]];
             uint8_t g_post = lut[entrada_orig[idx + 1]];
             uint8_t b_post = lut[entrada_orig[idx + 2]];
 
-            /* Suma de las 3 imagenes monocromaticas posterizadas:
-               Img_R(r_post, 0, 0) + Img_G(0, g_post, 0) + Img_B(0, 0, b_post) */
+            /* Almacenamiento en el buffer de salida posterizado */
             salida_post[idx + 0] = r_post;
             salida_post[idx + 1] = g_post;
             salida_post[idx + 2] = b_post;
@@ -309,10 +378,16 @@ static inline void rama2_posterizado_rango(
 }
 
 /* ============================================================================
- * COMBINACION FINAL: SUMA DE DETECCION DE BORDES + POSTERIZADO
+ * COMBINACION FINAL: FUSION DE BORDES + POSTERIZADO (Pagina 12 del Apunte)
  * ============================================================================
- *   "Finalmente se suman las imagenes resultantes de la deteccion de bordes
- *    y de la posterizacion."
+ *
+ * Se realiza la suma pixel a pixel entre la imagen posterizada y la mascara
+ * de bordes detectada. Para evitar desbordes aritmeticos por encima de 255,
+ * se aplica suma saturada:
+ *   Pixel_Final = min(255, Pixel_Posterizado + Pixel_Bordes)
+ *
+ * Como la deteccion de bordes vale 255 donde hay trazos fuertes, el resultado
+ * final resalta los contornos estilo dibujo animado / historieta (Cartoon).
  * ============================================================================ */
 static inline void combinar_bordes_y_posterizado_rango(
     const uint8_t *bordes,
@@ -325,8 +400,14 @@ static inline void combinar_bordes_y_posterizado_rango(
     for (int y = fila_ini; y < fila_fin; y++) {
         for (int x = 0; x < ancho; x++) {
             size_t idx = ((size_t)y * ancho + x) * CANALES_RGB;
+
+            /* Suma con saturacion para canal Rojo */
             salida_cartoon[idx + 0] = saturar_u8((int)posterizado[idx + 0] + (int)bordes[idx + 0]);
+
+            /* Suma con saturacion para canal Verde */
             salida_cartoon[idx + 1] = saturar_u8((int)posterizado[idx + 1] + (int)bordes[idx + 1]);
+
+            /* Suma con saturacion para canal Azul */
             salida_cartoon[idx + 2] = saturar_u8((int)posterizado[idx + 2] + (int)bordes[idx + 2]);
         }
     }
